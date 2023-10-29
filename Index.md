@@ -68,6 +68,84 @@
 ## R-TREE INDEX (Rpatial Index)
 ### 매커니즘은 B-Tree와 비슷하지만, B-Tree는 1차원 스칼라 값을 사용하고, R-Tree는 2차원 공간 개념값을 사용하여 Index을 구성
 
-### 1. 구조 및 특징
-- R-TREE INDEX은 MBR(Minimum Bounding Rectangle)의 포함 관계를 B-Tree 형태로 구현한 index
+- R-Tree index은 MBR(Minimum Bounding Rectangle)의 포함 관계를 B-Tree 형태로 구현한 index
   - MBR : 공간 데이터(_POINT, LINE, POLYGON, GEOMETRY_)를 포함하는 최소 크기의 사각형
+  
+## Full text Index (전문 검색 Index)
+- B-Tree index는 실제 칼럼의 값이 1MB이상 이더라도 1MB, 3072Byte로 잘라서 사용함
+- Full text Index는 단어의 어근 분석, n-gram 분석을 통해 구현 가능함
+  - 단어 어근 분석 
+    - 불용어(Stop Work)를 제거하고, 단어의 어근을 추출하는 작업
+    - 어근분석은 검색어로 선정된 단어의 뿌리인 원형을 찾는 작업
+      - 각 국가의 언어가 서로 문법이 다르고 다른 형태로 발전해봐왔기 땨문에 언어별로 모두 다른 어근 분석 라이브러리가 필요
+  - n-gram 알고리즘
+    - 키워드를 검색하기 위한 인덱싱 알고리즘
+    - 본문을 무조건 몇 글짜식 짤라ㅣ 인덱싱하는 방법
+    - 인데스의 크기가 상당히 큰 편임
+    - n-gram 알고리즘은 각 단어를 토큰 라이즈하고, 불용어 처리을 하기 떄문에, 불 필요한 불용어들은 무시하거나 대체하여 사용하는 것이 좋음
+      - 토큰 라이즈는 각 글자를 중첩해서 토큰으로 만듬. (2-gram ex. that -> th, ha, at)
+  - MySQL 불용어 설정
+    - MySQL 내장된 불용어는 `informainon_scheam_innodb_ft_default_stopword` 테이블에 저장되어 있음
+    - **불용어 처리 자체를 무시하거나 서버에 내장된 불용어 대신 사용자가 직접 불용어를 등록하는 방법을 권장함**
+    - 불용어 처리 설정
+      - 불용어가 담긴 `fy_stopword_file` 시스템 변수 수정 
+        - 불용어를 사용하지 않으려면, 빈 문자열로 설정 `ft_stopword_file = ''`
+        - 사용자 지정 불용어를 사용하려면, 불용어가 담긴 파일의 경로를 설정 `ft_stopword_file = '/usr/local/mysql/stopwords.txt'`
+        - 해당 시스템 변수는 서버가 시작될 때만 인지하기 때문에, 서버 시작시에 설정해줘야 함
+      - `informainon_scheam_innodb_ft_default_stopword` 시스템 변수를 수정
+        - 불용어를 사용하지 않으려면, OFF로 설정 `SET GLOBAL innodb_ft_server_stopword_table = 'OFF';`
+        - 사용자 지정 불용어를 사용하려면, 아래와 같이 불용어 테이블을 생성하고 설정
+          ``` sql
+          CREATE TABLE my_stopword(value VARCHAR(30)) ENGINE=InnoDB;
+          INSERT INTO my_stopword VALUES('a'),('an'),('the'),('is'),('of'),('and'),('or'),('not');
+          
+          SET GLOBAL innodb_ft_server_stopword_table = 'my_stopword';
+          ```
+        - 해당 시스템 변수는 서버가 실행 중인 상태에서도 변경 가능 함
+- Full text index을 사용하려면 아래의 두 조건을 만족해야 함
+  - 쿼리 문장이 전문 검색을 위한 문법(Match, Against)을 사용해야 함
+  - 테이블이 전문 검색 대상 칼럼에 대해서 전문 인덱스를 가지고 있어야 함
+
+## 함수 기반 인덱스
+- 칼럼의 값을 변형해서 만들어진 값에 대해 인덱스를 구축
+- MySQL 8.0 버전부터 함수 기반 인덱스를 지원함
+- 인덱스의 내부적인 구조 및 유지관리는 B-Tree와 동일함
+- 구현 방법
+  - 가상 칼럼을 이용한 인덱스
+    ``` sql
+    ALTER TABLE test_table
+    ADD fullname VARCHAR(20) AS (CONCAT(firstname, ' ', lastname)) VIRTUAL,
+    ADD INDEX idx_fullname(fullname);
+    ```
+  - 함수를 이용한 인덱스
+    ``` sql
+    CREATE TABLE test_table(
+      id INT NOT NULL AUTO_INCREMENT,
+      firstname VARCHAR(10),
+      lastname VARCHAR(10),
+      PRIMARY KEY(id),
+      INDEX idx_fullname((CONCAT(firstname, ' ', lastname)))
+    );
+    ```
+## Multi Value Index
+- 하나의 데이터 레코드가 여러 개의 키 값을 가질 수 있는 형태의 index
+- 주로 JSON 데이터 타입 레코드의 배열 타입 필드에 저장된 원소들에 대한 인덱스를 지원하기 위함
+- MySQL 8.0 버전부터 지원함
+
+## Clustering Index (= Clustering Key, Clustering Table)
+- Clustering Key가 비슷한 것들끼리 묶어서 저장하는 형태의 inedx
+  - Clustering Key 선발 기준
+    - PK가 있으면 PK을 Clustering Key로 사용
+    - NOT NULL option의 unique index 중에서 첫 번째 index을 Clustering Key로 사용
+    - 자동으로 유니크한 값을 가지도록 증가되는 칼럼을 내부적으로 추가한 후 Clustering Key로 사용 
+- InnoDB Storage Engine에서만 지원 (InnoDB에서는 PK값이 레코드의 물리적인 위치를 결정하는 특징을 이용)
+- 구조 자체는 B-Tree와 비슷하지만, **Clustering Index의 leaf node에는 레코드의 모든 칼럼이 같이 저장되어 있음**
+- 장점
+  - Clustering Key의 검색이 매우 빠름
+  - table의 모든 secondary index는 Clustering Key을 포함하고 있기 때문에 인덱스만으로 처리될 수 있는 경우가 많음
+- 단점
+  - Clustering Key의 크기가 클 경우 모든 전체적으로 index 크기가 커짐
+  - secondary index를 통해 검색할 때 Clustering Key로 다시 한 번 검색해야 하므로 처리 성능이 느림
+  - 물리적 저장 위치가 Clustering Key에 의해 결정되기 떄문에 INSERT, DELETE, Clustering Key 변경등의 장업이 느림 
+
+
