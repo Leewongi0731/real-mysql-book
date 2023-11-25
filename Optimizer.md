@@ -157,10 +157,10 @@
         - 버전/상황에 따라 사용하는 Storage engine이 다름
 
           |  | 메모리를 사용 | 디스크를 사용 |
-          | --- | --- | --- |
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | --- | --- | --- |
           | 8.0 미만 | MEMORY Storage engine (가변 길이 타입을 지원하지 않음) | MyISAM Storage engine (트랜잭션을 지원하지 못함) |
           | 8.0 이상 | TempleTable Storage engine | InnoDB Storage engine |
-        
+
         - 디스크에 생성되는 경우
             - UNION, UNION ALL에서 SELECT되는 칼럼 중에서 길이가 512Byte 이상의 칼럼이 있을 때
             - GROUP BY, DISTINCT 칼럼에서 512Byte 이상의 칼럼이 있을 때
@@ -222,4 +222,191 @@
                         2. Storage engine이 `b LIKE '%gi'` 필터링 조건을 보고 매칭되는 index을 줄임
                         3. Storage engine이 해당 index의 record 1개를 MySQL 엔진에 올려보냄
                 - 해당 flag는 기본적으로 `on` 임
+            - use_index_extensions
+                - innoDB Storage engine을 사용하는 테이블에서 세컨더리 인덱스에 자동으로 추가된 PK를 활용할 수 있게 해주는 옵션
+                    - ex. PK : a, b, index : c => c를 검색할 때 a, b를 활용할 수 있게 해줌 (c, a, b 인 index와 흡사하게 동작)
+                - 해당 flag는 기본적으로 `on` 임
+            - index_merge
+                - 하나의 테이블에 대해 2개 이상의 INDEX을 이용해 쿼리를 처리할 수 있게 해주는 옵션
+                - 쿼리에 사용된 각각의 조건이 다른 INDEX을 사용할 수 있고, 조건을 만족하는 record 건수가 많을 것으로 예상되면 index merge 실행 계획을 선택함
+                    - 하나의 INDEX만으로 작업 범위를 충분히 줄일 수 있는 경우면, 하나의 INDEX만 활용함
+                - 결과를 어떤 방식으로 merge할 것인지에 따라 3가지로 구분됨
+                    - index_merge_intersection
+                        - 각각의 INDEX를 이용해 검색된 record들을 교집합으로 처리
+                            - ex. `SELECT * FROM table WHERE a=1 AND b=2;`
+                        - 쿼리 결과의 Extra에 `Using intersect`이 표시됨
+                        - GLOBAL, SESSION, CURRENT QUERY 단위로 on, off 조절이 가능
+                    - index_merge_union
+                        - 각각의 INDEX를 이용해 검색된 record들을 합집합으로 처리
+                            - ex. `SELECT * FROM table WHERE a=1 OR b=2;`
+                        - 각 INDEX 조건에 만족하느 record들을 PK로 정렬되어 있으므로, Priority Queue를 이용해 정렬을 수행함 (PK값을 비교하면서 하나씩
+                          merge table에 insert)
+                        - 쿼리 결과의 Extra에 `Using union({index name}, {index name})`이 표시됨
+                    - index_merge_sort_union
+                        - 각각의 INDEX를 이용해 검색된 record들을 합집합으로 처리하고, 정렬까지 수행
+                        - 쿼리 결과의 Extra에 `Using sort_union({index name}, {index name});`이 표시됨
+                - 해당 flag들(4개)은 기본적으로 `on` 임
+            - semijoin
+                - 테이블간의 실제 조인을 수행하지 않고, 다른 테이블에서 조건에 일치하는 record가 존재하는지만 확인하는 쿼리
+                - `SET SESSION optimizer_switch='semijoin=off';` 로 off 가능
+                - 해당 flag는 기본적으로 `on` 임
+                - semijoin 최적화는 아래의 전략들을 모아서 부르는 말임
+                    - Table Pull Out
+                        - subquery에 사용된 테이블을 outer query로 끌어온 후에 query을 join query으로 변경함
+                            - subquery 최적화가 도입되기 이전에 수동으로 query을 튜닝하던 대표적인 방법
+                            - ex. `IN (subquery)` 형태의 쿼리을 `JOIN (subquery)` 형태로 튜닝한 것과 비슷하게 실행
+                        - 쿼리 결과의 Extra에 별도로 표기되는 문구는 없음
+                            - EXPLAIN 후에 SHOW WARNINGS를 통해 확인했을때, optiomizer가 re write한 query을 보고 최적화 여부를 판단 가능
+                        - Table Pull Out 최적화는 아래에 경우에만 사용 가능
+                            - semijoin subquery에서만 사용 가능
+                            - subquery 부분이 UNIQUE index나 PK lookup으로 결과가 1건인 경우에만 사용 가능
+                    - First Match
+                        - `IN (subquery)` 형태의 쿼리을 `EXISTS (subquery)` 형태로 튜닝한 것과 비슷하게 실행
+                        - 쿼리 결과의 Extra에 `FirstMatch({table name})`이 표시됨
+                        - MySQL 5.5에서 수행하던 `IN-to-EXISTS` 변환과 유사하게 처리되지만, First Match 전략을 다음과 같은 장점을 가짐
+                            - 여러 테이블이 JOIN되는 경우 원래 쿼리에는 없던 동등 조건을 Optimizer가 추가하기도 함
+                            - Subquery의 모든 Table에 대해 First Match 최적화를 수행할지 아니면 일부 Table에만 수행할지 취사선택할 수 있음
+                        - First Match 최적화의 특징
+                            - subquery는 subquery가 참조하는 모든 outer table이 먼저 조회된 이후에 실행됨
+                            - 지집합 함수(GROUP BY, DISTINCT ..)가 사용된 경우에는 사용할 수 없음
+                    - Loose Scan
+                        - `LOOSE INDEX SCAN`와 비슷한 읽기 방식을 사용함
+                        - 쿼리 결과의 Extra에 `LooseScan`이 표시됨
+                        - Loose Scan 최적화의 특징
+                            - `LOOSE INDEX SCAN`으로 subquery table을 읽고, 그 다음으로 outer table에 JOIN을 수행
+                    - Materialization
+                        - subquery을 통째로 구체화해서 query을 최적화함
+                            - 구체화란 내부의 Temp Table을 생성한다는 의미
+                        - 쿼리 결과의 Extra의 select_type에 `MATERIALIZED`가 표시됨
+                        - Materialization 최적화의 특징
+                            - IN (subquery) 에서 subquery는 상관 서브쿼리 (Correlated subquery)가 아니어야 함
+                                - Correlated subquery : subquery에서 외부테이블의 값을 참조할 때 사용
+                            - **subquery는 GROUP BY나 집합 합수들이 사용되도 최적화를 사용 가능함**
+                            - 내부 Temp Table을 사용함
+                    - Duplicate Weedout
+                        - semijoin subquery을 일반적인 INNER JOIN query로 바꿔서 실행하고 마지막에 중복된 record을 제거하는 방법으로 처리
+                            - 원본 query을 INNER JOIN + GROUP BY 절로 바꿔서 실행됨
+                        - 쿼리 결과의 Extra에 `Start temporary`, `End temporary`이 표시됨 (두 문구 구간이 subquery의 Duplicate
+                          Weedout 최적화의 실행 구간임)
+                        - Duplicate Weedout 최적화의 특징
+                            - subquery가 상관 서브쿼리 (Correlated subquery)이여도 사용 가능
+                            - subquery는 GROUP BY나 집합 합수들이 있으면 사용 불가
+            - condition_fanout_filter
+                - 조건절에 사용된 조건을 만족하는 record의 비율을 계산하여 사용
+                    - 두 조건을 만족하면 조건절을 만족하는 record의 비율을 계산할 수 있다.
+                        - WHERE 조건절에 사용된 column에 대해 INDEX가 있는 경우
+                        - WHERE 조건절에 사용된 column에 대해 히스토그램이 존재하는 경우
+                    - 다음과 같은 우선순위로 두고 사용 가능한 방식을 사용함
+                        - Range optimizer을 이용하여 예측 (실제 INDEX의 데이터를 살펴보고 record 건수를 예측, 소량의 데이터를 먼저 읽어봄)
+                        - 히스토그램을 이용하여 예측
+                        - INDEX 통계을 이용하여 예측
+                        - 추측에 기반한 예층 (Guesstimates)
+                    - 예측치를 계산하여 어떻게 사용하는거지??
+                - condition_fanout_filter 최적화를 활성화하면 optimizer는 더 정교한 계산을 걸쳐서 실행 계획을 수립하기 때문에 더 많은 시간과 자원을 사용함
+                - 해당 flag는 기본적으로 `on` 임
+            - derived_merge
+                - MySQL 5.7 도입되었으며, Temp table을 만드는 subquery을 외부 query와 병합해서 subquery 부분을 제거하는 최적화
+                    - 과거에는 FROM 절의 subquery을 temp table로 만든 후, 그 결과가지고 외부 query을 처리하였지만 아래와 같은 문제들이 있었음
+                        - temp table을 만들고, 그 이후 다시 읽는 과정에서 오버헤드가 추가됨
+                        - temp table은 초기에는 Memory에 적재되지만, 크기가 커지면 Disk로 옮겨가는데 이 과정에서도 오버헤드가 추가됨
+                - derived_merge 최적화를 사용하면, 쿼리가 다음과 같이 변경됨
+                    ``` sql
+                    -- AS-IS
+                    SELECT *  
+                    FROM (SELECT * FROM table_name WHERE c1 = 1) derived_table 
+                    WHERE derived_table.c2 = 2;
+                      
+                    -- TO-BE
+                    SELECT *
+                    FROM table_name 
+                    WHERE ((c1 = 1)) AND ((c2 = 2));
+                    ```
+                - subquery가 다음을 하나라도 만족할 경우, optimizer가 자동으로 derived_merge 최적화를 수행할 수 없음
+                    - WINDOW FUNCTION, 집계 합수(SUM, MIN, MAX ..), GROUP BY, HAVING, DISTINCT, LIMIT, UNION, UNION
+                      ALL 을 하나라도 포함한 경우
+                    - 외부 query의 SELECT 절에 사용된 경우
+                    - 값이 변경되는 사용자 변수를 사용
+                - 해당 flag는 기본적으로 `on` 임
+            - use_invisible_indexes
+                - MySQL 8.0 도입되었으며, index을 삭제하지 않고도 optimizer가 해당 index를 사용하지 않도록 할 수 있음
+                - 아래와 같이 사용 가능/불가능하게 설정할 수 있음
+                  ``` sql
+                  ALTER TABLE table_name ALTER INDEX index_name VISIBLE; -- 사용 가능하게 설정
+                  ALTER TABLE table_name ALTER INDEX index_name INVISIBLE; -- 사용 불가능하게 설정
+                  ```
+                - 해당 flag는 기본적으로 `off` 임
+            - skip_scan
+                - MySQL 8.0 도입되었으며, 제한적이지만 (A, B, C) index를 B, C 조건에서도 사용할 수 있게 할 수 있는 기법
+                - 실제 사용되지 않은 선행 컬럼이 매우 다양한 값을 가지는 경우에는 skip_scan 최적화가 매우 비효율적임
+                - 해당 flag는 기본적으로 `on` 임
+            - hash_join
+                - MySQL 8.0.18 부터 hash join을 지원하기 시작함
+                    - 8.0.17 까지는 `Block Nested Loop Join`을 사용하였지만, block의 크기가 join buffer보다 작으면 driving table을
+                      여러번 scan 해야하는 문제가 있었음
+                - nested loop join vs hash join
+                    - nested loop join은 첫 번째 record을 찾는건 빠르지만, 마지막 record을 찾는데 오래 걸림
+                        - Best Response time 전략에 적합
+                        - 일반적인 웹 서비스에 적합함
+                    - hash join은 첫 번째 record을 찾는건 오래걸리지만, 마지막 record을 찾는데 빠름
+                        - Best Throughput 전략에 적합
+                        - 일반적인 데이터 분석과 같은 서비스에 적합함
+                    - RDBMS인 MySQL은 일반적으로 데이터 분석보다는 웹 서비스에 사용함으로, hash join은 자선책 기능으로 생각하는게 좋음
+                - hash join은 `Build phase`, `Probe phase`로 나누어서 처리됨
+                    - `Build phase` : Join 대상 table 중 record가 적어 hash table로 만들기 용이한 table을 찾아서, hash table을 만드는
+                      작업
+                    - `Probe phase` : 나머지 table의 record을 읽어서 hash table의 일치 record을 찾는 과정.
+                    - hash table 크기는 `join_buffer_size` 으로 조정 가능함 (default : 256KB)
+                    - buffer size가 부족하면, hash table (build table), probe table을 chunk 단위로 분리한 다음 disk로 옮겨가면서 처리함
+                - 해당 flag는 기본적으로 `on` 임
+            - prefer_ordering_index
+                - MySQL 8.0.21 도입되었으며, ORDER BY을 위한 index에 너무 가중치를 부여하지 않도록 설정 가능
+                - MySQL 8.0.20 까지의 optimizer는 아래의 상황에서 order by index에 높은 가중치를 두고 잘못된 판단을 내릴때가 가끔 있었음
+                    - example.
+                        ``` sql
+                        SELECT *  
+                        FROM table_name 
+                        WHERE c1 BETWWEN '1985-01-01' AND '1985-12-31'
+                        ORDER BY pk;
+                        ```
+                        1. (c1) index을 이용하여 WHERE 절에 일치하는 record을 찾은 다음 pk로 정렬하여 결과를 반환
+                        2. pk키를 순서대로 읽으면서 c1 column의 조건에 일치하는지 비교 후 결과를 반환
 
+                        - 1번의 매우 효과적이였을 상황에서도, 2번으로 실행하여 pk을 full scan하는 상황이 가끔 있었음.
+                - 해당 flag는 기본적으로 `on` 임
+    - JOIN 최적 알고리즘
+        - Exhaustive 검색 알고리즘
+            - MySQL 5.0 까지 사용되던 JOIN 최적화 기법
+            - FROM젛에 명시된 모든 table의 조합에 대해 실행 계획의 비용을 계산해서 최적의 조합 1개를 찾는 방식
+            - JOIN하는 table이 20개라면 20! = 3,628,800 개의 모든 case의 비용을 계산 -> table이 조금만 많아져도 매우 오래 걸림
+        - Greedy 검색 알고리즘
+            - MySQL 5.0에 도입된 JOIN 최적화 기법
+            - 아래의 순서대로 진행됨
+                1. 전체 N개의 table 중에서 `optimizer_search_depth` 변수에 정의된 개수의 table로 가능한 JOIN 조합을 생성
+                2. (1)에서 생성된 조합 중 최소 비용의 실행 계획 하나를 확정
+                3. (2)에서 선정된 실행 계획의 첫 번째 테이블을 "**부분 실행 계획**"의 첫 번째 테이블로 선정
+                4. 전체 N-1개의 (_**(3)에서 선정된 table 제외**_) table 중에서 `optimizer_search_depth` 변수에 정의된 개수의 table로 가능한
+                   JOIN 조합을 생성
+                5. (4)에서 생성된 조합 중 하나씩 (3)번에서 생성된 "**부분 실행 계획**"에 대입해 실행 비용을 계산
+                6. (5)번의 비용 계산 결과, 최적의 실행 계획에서 두 번째 table을 "**부분 실행 계획**"의 두 번째 table로 선정
+                7. 모든 테이블이 없어질 떄까지 (4)번부터 (6)번까지 반복
+                8. 최종적으로 "**부분 실행 계획**"이 table의 JOIN 순서로 결정
+            - JOIN 최적화를 위한 시스템변수
+                - optimizer_search_depth
+                    - `optimizer_search_depth`는 0부터 62까지의 정숫값을 설정할 수 있음 (default : 62)
+                        - 0으로 설정시 Exhaustive 검색 알고리즘을 사용함
+                        - 1~62로 설정시 Greedy 검색 알고리즘을 사용함
+                    - `optimizer_search_depth`의 변수 값에 따라 JOIN 최적화 비용이 차이가 남
+                        - JOIN table 수가 7 ~ 10 개 미만이라면 큰 문제가 되지 않음
+                        - JOIN table 수가 12개 이면서 `optimizer_search_depth`가 12 이상이라면, 며칠이 걸릴 수 있음.
+                          이떄 `optimizer_search_depth`을 3~4로만 낮춰도 1분이내로 단축시킬 수
+                          있음 ([docs](https://dev.mysql.com/doc/refman/8.0/en/controlling-query-plan-evaluation.html))
+                        - 필자는 4~5 정도로 설정하는 것을 추천함
+                    - RUN TIME중에 변경 가능
+                    - JOIN될 table의 개수가 해당 설정 값보다 크다면, 해당 설정 값만큼은 Exhaustive 검색 알고리즘을 사용하고 나머지 table은 Greedy 검색
+                      알고리즘을 사용함
+                - optimizer_prune_level
+                    - `optimizer_prune_level는 0, 1 둘중 하나로 설정할 수 있음 (default : 1)
+                        - 0으로 설정시 Heuristic 검색 알고리즘을 사용하지 않음
+                        - 1로 설정시 Heuristic 검색 알고리즘을 사용함
+                    - Heuristic 검색 알고리즘
+                        - Heuristic 알고리즘은 비용을 계산하던 도중 앞서 계산했던 최적의 JOIN 순서의 비용보다 큰 경우 계산 도중에 포기함
